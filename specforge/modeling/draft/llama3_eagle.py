@@ -1457,7 +1457,12 @@ class LlamaDecoderLayer(nn.Module):
 class LlamaForCausalLMEagle3(Eagle3DraftModel):
 
     config_class = LlamaConfig
-    _tied_weights_keys = []  # transformers 5.0.0 compat
+    _tied_weights_keys = []
+
+    @property
+    def all_tied_weights_keys(self):
+        """transformers 5.0.0 compat"""
+        return set(self._tied_weights_keys) if self._tied_weights_keys else set()
 
     def __init__(self, config, quant_config=None, attention_backend="sdpa") -> None:
         super().__init__(config)

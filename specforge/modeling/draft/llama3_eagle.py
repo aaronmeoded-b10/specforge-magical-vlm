@@ -1461,8 +1461,8 @@ class LlamaForCausalLMEagle3(Eagle3DraftModel):
 
     @property
     def all_tied_weights_keys(self):
-        """transformers 5.0.0 compat"""
-        return set(self._tied_weights_keys) if self._tied_weights_keys else set()
+        """transformers 5.0.0 compat — returns dict mapping key -> set of tied keys"""
+        return {}
 
     def __init__(self, config, quant_config=None, attention_backend="sdpa") -> None:
         super().__init__(config)

@@ -456,48 +456,128 @@ def build_dataloaders(
     is_online = (
         args.train_data_path is not None and args.train_hidden_states_path is None
     )
-    with rank_0_priority():
-        train_eagle3_dataset = build_eagle3_dataset(
-            dataset=train_dataset,
-            tokenizer=tokenizer,
-            chat_template=args.chat_template,
-            max_length=args.max_length,
-            cache_dir=os.path.join(args.cache_dir, "processed_dataset"),
-            cache_key=cache_key,
-            is_vlm=args.is_vlm,
-            is_preformatted=args.is_preformatted,
+    # Use on-the-fly VLM dataset to avoid massive Arrow cache from dataset.map()
+    if args.is_vlm and args.target_model_backend == "custom":
+        from specforge.data.vlm_onthefly import VLMOnTheFlyDataset, VLMOnTheFlyCollator
+        from torch.utils.data import DataLoader
+        from torch.utils.data.distributed import DistributedSampler
+
+        train_eagle3_dataset = VLMOnTheFlyDataset(
+            jsonl_path=args.train_data_path,
             processor=processor,
-            num_proc=args.build_dataset_num_proc,
-            train_only_last_turn=args.train_only_last_turn,
-        )
-        vocab_mapping_path = generate_vocab_mapping_file(
-            dataset=train_eagle3_dataset,
-            target_vocab_size=draft_model_config.vocab_size,
-            draft_vocab_size=draft_model_config.draft_vocab_size,
-            cache_dir=os.path.join(args.cache_dir, "vocab_mapping"),
-            cache_key=cache_key,
+            chat_template_name=args.chat_template,
+            max_length=args.max_length,
         )
 
-        if not is_online:
-            train_eagle3_dataset = build_offline_eagle3_dataset(
-                args.train_hidden_states_path,
-                args.max_length,
+        # Still need vocab mapping — compute from a small sample
+        with rank_0_priority():
+            # Build a tiny pre-tokenized dataset just for vocab mapping (first 100 examples)
+            small_dataset = load_dataset("json", data_files=args.train_data_path)["train"]
+            if len(small_dataset) > 100:
+                small_dataset = small_dataset.select(range(100))
+            small_tokenized = build_eagle3_dataset(
+                dataset=small_dataset,
+                tokenizer=tokenizer,
+                chat_template=args.chat_template,
+                max_length=args.max_length,
+                cache_dir=os.path.join(args.cache_dir, "processed_dataset_small"),
+                cache_key=cache_key + "_small",
+                is_vlm=args.is_vlm,
+                is_preformatted=args.is_preformatted,
+                processor=processor,
+                num_proc=args.build_dataset_num_proc,
+                train_only_last_turn=args.train_only_last_turn,
+            )
+            vocab_mapping_path = generate_vocab_mapping_file(
+                dataset=small_tokenized,
+                target_vocab_size=draft_model_config.vocab_size,
+                draft_vocab_size=draft_model_config.draft_vocab_size,
+                cache_dir=os.path.join(args.cache_dir, "vocab_mapping"),
+                cache_key=cache_key,
             )
 
-    train_dataloader = prepare_dp_dataloaders(
-        train_eagle3_dataset,
-        args.target_batch_size,
-        num_workers=args.dataloader_num_workers,
-        shuffle=True,
-        process_group=(
-            get_draft_dp_group()
-            if args.attention_backend == "usp" and not is_online
-            else get_dp_group()
-        ),
-        is_vlm=args.is_vlm,
-    )
+        sampler = DistributedSampler(
+            train_eagle3_dataset,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=True,
+        )
+        train_dataloader = DataLoader(
+            train_eagle3_dataset,
+            batch_size=args.target_batch_size,
+            sampler=sampler,
+            collate_fn=VLMOnTheFlyCollator(pad_token_id=tokenizer.pad_token_id or 0),
+            num_workers=0,  # Must be 0 for on-the-fly processor calls
+            pin_memory=True,
+        )
+    else:
+        with rank_0_priority():
+            train_eagle3_dataset = build_eagle3_dataset(
+                dataset=train_dataset,
+                tokenizer=tokenizer,
+                chat_template=args.chat_template,
+                max_length=args.max_length,
+                cache_dir=os.path.join(args.cache_dir, "processed_dataset"),
+                cache_key=cache_key,
+                is_vlm=args.is_vlm,
+                is_preformatted=args.is_preformatted,
+                processor=processor,
+                num_proc=args.build_dataset_num_proc,
+                train_only_last_turn=args.train_only_last_turn,
+            )
+            vocab_mapping_path = generate_vocab_mapping_file(
+                dataset=train_eagle3_dataset,
+                target_vocab_size=draft_model_config.vocab_size,
+                draft_vocab_size=draft_model_config.draft_vocab_size,
+                cache_dir=os.path.join(args.cache_dir, "vocab_mapping"),
+                cache_key=cache_key,
+            )
+
+            if not is_online:
+                train_eagle3_dataset = build_offline_eagle3_dataset(
+                    args.train_hidden_states_path,
+                    args.max_length,
+                )
+
+        train_dataloader = prepare_dp_dataloaders(
+            train_eagle3_dataset,
+            args.target_batch_size,
+            num_workers=args.dataloader_num_workers,
+            shuffle=True,
+            process_group=(
+                get_draft_dp_group()
+                if args.attention_backend == "usp" and not is_online
+                else get_dp_group()
+            ),
+            is_vlm=args.is_vlm,
+        )
     if args.eval_data_path is not None or args.eval_hidden_states_path is not None:
-        if args.eval_data_path is not None:
+        if args.is_vlm and args.target_model_backend == "custom" and args.eval_data_path is not None:
+            from specforge.data.vlm_onthefly import VLMOnTheFlyDataset, VLMOnTheFlyCollator
+            from torch.utils.data import DataLoader
+            from torch.utils.data.distributed import DistributedSampler
+
+            eval_eagle3_dataset = VLMOnTheFlyDataset(
+                jsonl_path=args.eval_data_path,
+                processor=processor,
+                chat_template_name=args.chat_template,
+                max_length=args.max_length,
+            )
+            eval_sampler = DistributedSampler(
+                eval_eagle3_dataset,
+                num_replicas=dist.get_world_size(),
+                rank=dist.get_rank(),
+                shuffle=False,
+            )
+            eval_dataloader = DataLoader(
+                eval_eagle3_dataset,
+                batch_size=args.target_batch_size,
+                sampler=eval_sampler,
+                collate_fn=VLMOnTheFlyCollator(pad_token_id=tokenizer.pad_token_id or 0),
+                num_workers=0,
+                pin_memory=True,
+            )
+        elif args.eval_data_path is not None:
             eval_dataset = load_dataset("json", data_files=args.eval_data_path)["train"]
             eval_eagle3_dataset = build_eagle3_dataset(
                 eval_dataset,
@@ -515,13 +595,14 @@ def build_dataloaders(
                 args.eval_hidden_states_path,
                 args.max_length,
             )
-        eval_dataloader = prepare_dp_dataloaders(
-            eval_eagle3_dataset,
-            args.target_batch_size,
-            num_workers=args.dataloader_num_workers,
-            shuffle=False,
-            process_group=(
-                get_draft_dp_group()
+        if not (args.is_vlm and args.target_model_backend == "custom" and args.eval_data_path is not None):
+            eval_dataloader = prepare_dp_dataloaders(
+                eval_eagle3_dataset,
+                args.target_batch_size,
+                num_workers=args.dataloader_num_workers,
+                shuffle=False,
+                process_group=(
+                    get_draft_dp_group()
                 if args.attention_backend == "usp" and not is_online
                 else get_dp_group()
             ),

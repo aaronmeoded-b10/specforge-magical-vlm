@@ -16,7 +16,6 @@ import os
 from typing import Dict, List, Optional
 
 import torch
-from PIL import Image
 from torch.utils.data import Dataset
 
 try:
@@ -36,7 +35,7 @@ class VLMOnTheFlyDataset(Dataset):
         jsonl_path: str,
         processor,
         chat_template_name: str,
-        max_length: int = 8192,
+        max_length: int = 32000,
         max_examples: Optional[int] = None,
     ):
         self.processor = processor
@@ -58,33 +57,6 @@ class VLMOnTheFlyDataset(Dataset):
         return len(self.examples)
 
     def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
-        # Try up to 10 different examples if the current one fails
-        for attempt in range(10):
-            try:
-                return self._process_example((idx + attempt) % len(self.examples))
-            except Exception as e:
-                if attempt == 0:
-                    print(f"Warning: failed to process example {idx}: {e}")
-        # Last resort: create a minimal valid VLM example with a tiny image
-        print(f"Error: failed 10 attempts starting from example {idx}. Returning minimal example.")
-        from PIL import Image as PILImage
-        tiny_img = PILImage.new('RGB', (56, 56), color='black')
-        messages = [
-            {"role": "system", "content": "test"},
-            {"role": "user", "content": [{"type": "image", "image": tiny_img}, {"type": "text", "text": "test"}]},
-            {"role": "assistant", "content": "test"},
-        ]
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-        enc = self.processor(text=[text], images=[tiny_img], return_tensors="pt", add_special_tokens=False)
-        return {
-            "input_ids": enc.input_ids[0],
-            "attention_mask": torch.ones_like(enc.input_ids[0]),
-            "loss_mask": torch.zeros(enc.input_ids[0].shape[0], dtype=torch.float32),
-            "pixel_values": enc.pixel_values,
-            "image_grid_thw": enc.image_grid_thw,
-        }
-
-    def _process_example(self, idx) -> Dict[str, torch.Tensor]:
         example = self.examples[idx]
         conversations = example["conversations"]
 
@@ -103,31 +75,22 @@ class VLMOnTheFlyDataset(Dataset):
         for sentence in source:
             role = sentence["role"]
             content = sentence.get("content", "")
-            if isinstance(content, list):
-                messages.append({"role": role, "content": content})
-            else:
-                messages.append({"role": role, "content": content})
+            messages.append({"role": role, "content": content})
 
         # Apply chat template
         conversation = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=False
         )
 
-        # Extract images using qwen_vl_utils
+        # Extract images
         if not HAS_QWEN_VL_UTILS:
-            raise ImportError("qwen_vl_utils is required for VLM on-the-fly processing")
+            raise ImportError("qwen_vl_utils is required")
 
         image_inputs, video_inputs = process_vision_info(messages)
         if image_inputs is None:
             image_inputs = []
 
-        # Pre-filter: skip examples that are too long (truncation breaks image tokens)
-        text_token_estimate = len(conversation) // 3
-        image_token_estimate = len(image_inputs) * 4200
-        if text_token_estimate + image_token_estimate > self.max_length * 1.5:
-            raise ValueError(f"Example too long (~{text_token_estimate + image_token_estimate} tokens), skipping")
-
-        # Tokenize through processor (no truncation)
+        # Tokenize through processor (no truncation — max_length should cover all examples)
         proc_kwargs = dict(
             text=[conversation],
             return_tensors="pt",
@@ -144,18 +107,14 @@ class VLMOnTheFlyDataset(Dataset):
         pixel_values = getattr(encoding, "pixel_values", None)
         image_grid_thw = getattr(encoding, "image_grid_thw", None)
 
-        # Truncate input_ids to max_length (but keep all pixel_values/grid_thw intact)
-        if len(input_ids) > self.max_length:
-            input_ids = input_ids[:self.max_length]
-
         # Create attention mask
         attention_mask = torch.ones_like(input_ids)
 
         # Create loss mask (1 for assistant tokens, 0 for prompt)
         loss_mask = torch.zeros_like(input_ids, dtype=torch.float32)
         decoded = self.tokenizer.decode(input_ids, skip_special_tokens=False)
-        ast_header = self.chat_template.assistant_header  # e.g. "<|im_start|>assistant\n"
-        eot_token = self.chat_template.end_of_turn_token  # e.g. "<|im_end|>\n"
+        ast_header = self.chat_template.assistant_header
+        eot_token = self.chat_template.end_of_turn_token
 
         # Find all assistant spans and mark them
         pos = 0
@@ -199,8 +158,8 @@ class VLMOnTheFlyCollator:
                 "input_ids": f["input_ids"].unsqueeze(0),
                 "attention_mask": f["attention_mask"].unsqueeze(0),
                 "loss_mask": f["loss_mask"].unsqueeze(0),
-                "pixel_values": f["pixel_values"],  # already has right shape from processor
-                "image_grid_thw": f["image_grid_thw"],  # [num_images, 3]
+                "pixel_values": f["pixel_values"],
+                "image_grid_thw": f["image_grid_thw"],
             }
 
         # For batch_size > 1, pad sequences

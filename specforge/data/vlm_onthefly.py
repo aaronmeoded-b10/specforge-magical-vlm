@@ -28,44 +28,6 @@ except ImportError:
 from .template import TEMPLATE_REGISTRY, ChatTemplate
 
 
-def _apply_loss_mask(input_ids, tokenizer, chat_template: ChatTemplate):
-    """Create loss mask: 1 for assistant tokens, 0 for everything else."""
-    decoded = tokenizer.decode(input_ids, skip_special_tokens=False)
-    loss_mask = torch.zeros_like(input_ids, dtype=torch.float32)
-
-    # Find assistant response spans using chat template markers
-    ast_start = chat_template.assistant_start
-    ast_end = chat_template.assistant_end
-
-    tokens_so_far = 0
-    text = decoded
-    while ast_start in text:
-        start_idx = text.index(ast_start)
-        # Find the end of this assistant turn
-        after_start = text[start_idx + len(ast_start):]
-        if ast_end in after_start:
-            end_idx = start_idx + len(ast_start) + after_start.index(ast_end)
-        else:
-            end_idx = len(text)
-
-        # Map character positions to token positions (approximate)
-        # Use the tokenizer to get exact positions
-        prefix = text[:start_idx + len(ast_start)]
-        prefix_tokens = tokenizer.encode(prefix, add_special_tokens=False)
-        content = text[:end_idx]
-        content_tokens = tokenizer.encode(content, add_special_tokens=False)
-
-        # Mark assistant tokens
-        start_token = len(prefix_tokens)
-        end_token = len(content_tokens)
-        if start_token < len(loss_mask) and end_token <= len(loss_mask):
-            loss_mask[start_token:end_token] = 1.0
-
-        text = text[end_idx + len(ast_end):]
-
-    return loss_mask
-
-
 class VLMOnTheFlyDataset(Dataset):
     """Dataset that tokenizes VLM examples on-the-fly, avoiding massive Arrow caches."""
 
@@ -155,32 +117,29 @@ class VLMOnTheFlyDataset(Dataset):
         attention_mask = torch.ones_like(input_ids)
 
         # Create loss mask (1 for assistant tokens, 0 for prompt)
-        # Simple approach: mark everything after the last assistant start as loss
         loss_mask = torch.zeros_like(input_ids, dtype=torch.float32)
         decoded = self.tokenizer.decode(input_ids, skip_special_tokens=False)
-        ast_end_token = self.chat_template.assistant_end
-        ast_start_token = self.chat_template.assistant_start
+        ast_header = self.chat_template.assistant_header  # e.g. "<|im_start|>assistant\n"
+        eot_token = self.chat_template.end_of_turn_token  # e.g. "<|im_end|>\n"
 
         # Find all assistant spans and mark them
         pos = 0
         while True:
-            start = decoded.find(ast_start_token, pos)
+            start = decoded.find(ast_header, pos)
             if start == -1:
                 break
-            end = decoded.find(ast_end_token, start + len(ast_start_token))
+            end = decoded.find(eot_token, start + len(ast_header))
             if end == -1:
                 end = len(decoded)
-            else:
-                end = end  # don't include the end token
 
             # Map character positions to token positions
-            prefix_len = len(self.tokenizer.encode(decoded[:start + len(ast_start_token)], add_special_tokens=False))
+            prefix_len = len(self.tokenizer.encode(decoded[:start + len(ast_header)], add_special_tokens=False))
             content_len = len(self.tokenizer.encode(decoded[:end], add_special_tokens=False))
 
             if prefix_len < len(loss_mask):
                 loss_mask[prefix_len:min(content_len, len(loss_mask))] = 1.0
 
-            pos = end + len(ast_end_token)
+            pos = end + len(eot_token) if eot_token else end + 1
 
         return {
             "input_ids": input_ids,

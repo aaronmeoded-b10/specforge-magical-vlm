@@ -58,6 +58,14 @@ class VLMOnTheFlyDataset(Dataset):
         return len(self.examples)
 
     def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
+        try:
+            return self._process_example(idx)
+        except Exception as e:
+            # On error, try a different example (avoid crashing entire training)
+            print(f"Warning: failed to process example {idx}: {e}. Trying next example.")
+            return self._process_example((idx + 1) % len(self.examples))
+
+    def _process_example(self, idx) -> Dict[str, torch.Tensor]:
         example = self.examples[idx]
         conversations = example["conversations"]
 

@@ -272,8 +272,7 @@ def preprocess_vlm_conversations(
         input_ids = encoding.input_ids[0]
         offsets = encoding.offset_mapping[0]
         pixel_values = getattr(encoding, "pixel_values", None)
-        image_grid_thw_raw = getattr(encoding, "image_grid_thw", None)
-        image_grid_thw = image_grid_thw_raw[0] if image_grid_thw_raw is not None else None
+        image_grid_thw = getattr(encoding, "image_grid_thw", None)
 
         # get conversation with image info for loss mask generation
         decoded_conversation = processor.tokenizer.decode(
@@ -289,7 +288,7 @@ def preprocess_vlm_conversations(
         results["loss_mask"].append(loss_mask[None, :])
         results["attention_mask"].append(torch.ones_like(loss_mask)[None, :])
         results["pixel_values"].append(pixel_values)
-        results["image_grid_thw"].append(image_grid_thw[None, :] if image_grid_thw is not None else None)
+        results["image_grid_thw"].append(image_grid_thw if image_grid_thw is not None else None)
     return results
 
 

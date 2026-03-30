@@ -65,15 +65,23 @@ class VLMOnTheFlyDataset(Dataset):
             except Exception as e:
                 if attempt == 0:
                     print(f"Warning: failed to process example {idx}: {e}")
-        # Last resort: return a minimal dummy example
-        print(f"Error: failed 10 attempts starting from example {idx}. Returning dummy.")
-        dummy_ids = torch.zeros(10, dtype=torch.long)
+        # Last resort: create a minimal valid VLM example with a tiny image
+        print(f"Error: failed 10 attempts starting from example {idx}. Returning minimal example.")
+        from PIL import Image as PILImage
+        tiny_img = PILImage.new('RGB', (56, 56), color='black')
+        messages = [
+            {"role": "system", "content": "test"},
+            {"role": "user", "content": [{"type": "image", "image": tiny_img}, {"type": "text", "text": "test"}]},
+            {"role": "assistant", "content": "test"},
+        ]
+        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+        enc = self.processor(text=[text], images=[tiny_img], return_tensors="pt", add_special_tokens=False)
         return {
-            "input_ids": dummy_ids,
-            "attention_mask": torch.ones_like(dummy_ids),
-            "loss_mask": torch.zeros(10, dtype=torch.float32),
-            "pixel_values": None,
-            "image_grid_thw": None,
+            "input_ids": enc.input_ids[0],
+            "attention_mask": torch.ones_like(enc.input_ids[0]),
+            "loss_mask": torch.zeros(enc.input_ids[0].shape[0], dtype=torch.float32),
+            "pixel_values": enc.pixel_values,
+            "image_grid_thw": enc.image_grid_thw,
         }
 
     def _process_example(self, idx) -> Dict[str, torch.Tensor]:

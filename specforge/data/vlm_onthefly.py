@@ -113,8 +113,13 @@ class VLMOnTheFlyDataset(Dataset):
         if image_inputs is None:
             image_inputs = []
 
-        # Tokenize through processor (no truncation — skip if too long instead,
-        # because truncation can cut image tokens causing a mismatch error)
+        # Pre-filter: skip examples that are too long (truncation breaks image tokens)
+        text_token_estimate = len(conversation) // 3
+        image_token_estimate = len(image_inputs) * 4200
+        if text_token_estimate + image_token_estimate > self.max_length * 1.5:
+            raise ValueError(f"Example too long (~{text_token_estimate + image_token_estimate} tokens), skipping")
+
+        # Tokenize through processor (no truncation)
         proc_kwargs = dict(
             text=[conversation],
             return_tensors="pt",

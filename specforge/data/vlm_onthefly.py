@@ -113,11 +113,10 @@ class VLMOnTheFlyDataset(Dataset):
         if image_inputs is None:
             image_inputs = []
 
-        # Tokenize through processor
+        # Tokenize through processor (no truncation — skip if too long instead,
+        # because truncation can cut image tokens causing a mismatch error)
         proc_kwargs = dict(
             text=[conversation],
-            max_length=self.max_length,
-            truncation=True,
             return_tensors="pt",
             add_special_tokens=False,
         )
@@ -131,6 +130,10 @@ class VLMOnTheFlyDataset(Dataset):
         input_ids = encoding.input_ids[0]
         pixel_values = getattr(encoding, "pixel_values", None)
         image_grid_thw = getattr(encoding, "image_grid_thw", None)
+
+        # Truncate input_ids to max_length (but keep all pixel_values/grid_thw intact)
+        if len(input_ids) > self.max_length:
+            input_ids = input_ids[:self.max_length]
 
         # Create attention mask
         attention_mask = torch.ones_like(input_ids)

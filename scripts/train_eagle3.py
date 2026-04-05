@@ -203,6 +203,21 @@ def parse_args() -> Tuple[ArgumentParser, Namespace]:
         help="The directory to download the target model to",
     )
 
+    # huggingface upload args
+    hf_group = parser.add_argument_group("huggingface")
+    hf_group.add_argument(
+        "--hf-repo-id",
+        type=str,
+        default=None,
+        help="HuggingFace repo to upload checkpoints to after each save (e.g. 'org/model-name')",
+    )
+    hf_group.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help="HuggingFace write token. Falls back to HF_TOKEN env var.",
+    )
+
     # vlm related args
     vlm_group = parser.add_argument_group("vlm")
     vlm_group.add_argument(
@@ -660,6 +675,42 @@ def save_checkpoints(
         dist.barrier()
 
 
+def upload_checkpoint_to_hf(
+    args: Namespace,
+    epoch: int,
+    step: int,
+):
+    """Upload a saved checkpoint to HuggingFace Hub (rank 0 only)."""
+    if args.hf_repo_id is None or dist.get_rank() != 0:
+        return
+
+    epoch_output_dir = os.path.join(args.output_dir, f"epoch_{epoch}_step_{step}")
+    if not os.path.isdir(epoch_output_dir):
+        print_on_rank0(f"Checkpoint dir {epoch_output_dir} not found, skipping upload")
+        return
+
+    token = args.hf_token or os.environ.get("HF_TOKEN")
+    if not token:
+        print_on_rank0("No HF token available, skipping upload")
+        return
+
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=token)
+        api.create_repo(args.hf_repo_id, exist_ok=True, private=True)
+        name = f"epoch_{epoch}_step_{step}"
+        print_on_rank0(f"Uploading checkpoint {name} to {args.hf_repo_id}...")
+        api.upload_folder(
+            folder_path=epoch_output_dir,
+            repo_id=args.hf_repo_id,
+            path_in_repo=name,
+            commit_message=f"Checkpoint {name}",
+        )
+        print_on_rank0(f"Uploaded {name} to {args.hf_repo_id}")
+    except Exception as e:
+        print_on_rank0(f"HF upload failed for epoch_{epoch}_step_{step}: {e}")
+
+
 def run_forward(
     args: Namespace,
     eagle3_model: nn.Module,
@@ -672,8 +723,8 @@ def run_forward(
             input_ids=data["input_ids"].cuda(),
             attention_mask=data["attention_mask"].cuda(),
             loss_mask=data["loss_mask"].cuda(),
-            pixel_values=data["pixel_values"].cuda(),
-            image_grid_thw=data["image_grid_thw"].cuda(),
+            pixel_values=data["pixel_values"].cuda() if data["pixel_values"] is not None else None,
+            image_grid_thw=data["image_grid_thw"].cuda() if data["image_grid_thw"] is not None else None,
         )
     else:
         image_grid_thw = None
@@ -1072,6 +1123,7 @@ def main():
             if global_step % args.save_interval == 0:
                 # Save the model
                 save_checkpoints(args, epoch, global_step, eagle3_model, optimizer)
+                upload_checkpoint_to_hf(args, epoch, global_step)
 
             if args.max_num_steps is not None and global_step >= args.max_num_steps:
                 break
@@ -1084,6 +1136,7 @@ def main():
             f"Training completed at step {global_step}, saving final checkpoint..."
         )
         save_checkpoints(args, epoch, global_step, eagle3_model, optimizer)
+        upload_checkpoint_to_hf(args, epoch, global_step)
 
     # Close the tracker
     tracker.close()

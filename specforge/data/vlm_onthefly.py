@@ -77,9 +77,13 @@ class VLMOnTheFlyDataset(Dataset):
             content = sentence.get("content", "")
             messages.append({"role": role, "content": content})
 
-        # Apply chat template
+        # Apply chat template, passing tools if present
+        chat_template_kwargs = dict(tokenize=False, add_generation_prompt=False)
+        if "tools" in example and example["tools"]:
+            chat_template_kwargs["tools"] = example["tools"]
+
         conversation = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False
+            messages, **chat_template_kwargs
         )
 
         # Extract images

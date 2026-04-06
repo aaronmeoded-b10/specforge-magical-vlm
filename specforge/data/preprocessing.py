@@ -212,6 +212,7 @@ def preprocess_vlm_conversations(
     # Also supports multi-turn conversations with any valid role sequence.
     has_multi_images = "images" in examples
     has_single_image = "image" in examples
+    has_tools = "tools" in examples
     num_examples = len(examples["conversations"])
 
     for i in range(num_examples):
@@ -238,10 +239,22 @@ def preprocess_vlm_conversations(
             else:
                 messages.append({"role": role, "content": content})
 
-        conversation = processor.apply_chat_template(
-            messages,
+        # Pass tools to chat template if present (e.g. Magical dataset)
+        chat_template_kwargs = dict(
             tokenize=False,
             add_generation_prompt=False,
+        )
+        if has_tools and examples["tools"][i]:
+            tools = examples["tools"][i]
+            # tools may be a JSON string or already parsed
+            if isinstance(tools, str):
+                import json as _json
+                tools = _json.loads(tools)
+            chat_template_kwargs["tools"] = tools
+
+        conversation = processor.apply_chat_template(
+            messages,
+            **chat_template_kwargs,
         )
         # get vision infor use qwen_vl_utils
         if not HAS_QWEN_VL_UTILS:
